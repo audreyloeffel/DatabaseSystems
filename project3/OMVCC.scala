@@ -27,15 +27,15 @@ object OMVCC {
   case class TransactionAlreadyFinished(s: String) extends Exception
   case class TransactionNotFound(s: String) extends Exception
 
-  sealed trait ReadAction
-  case class Read(key: Int, version: Long) extends ReadAction
+  case class Read(key: Int, version: Long) 
   case class Write(key: Int, version: Long){
     var value: Int = -1
   }
-  case class ModQuery(k: Int, mods: MutableList[Int]) extends ReadAction
+  case class ModQuery(k: Int, mods: MutableList[Int])
 
   case class Xact(id: Long, timestamp: Long){
-    var logRead: Set[ReadAction] = Set()
+    var logRead: Set[Read] = Set()
+    var logModQuery: Set[ModQuery] = Set()
     var logWrite: Set[Write] = Set()
     var committed: Boolean = false
     var finished: Boolean = false
@@ -100,12 +100,12 @@ object OMVCC {
         val mod = value % k
         if(mod == 0){
           l.add(value)
-          ml+=value
+          ml+=key
         }
       }
     }
     val modQ = ModQuery(k, ml)
-    transaction.logRead.add(modQ)
+    transaction.logModQuery.add(modQ)
     l
   }
 
@@ -170,17 +170,31 @@ object OMVCC {
     //all transactions having committed between startTime and now
     val transaction = getTransaction(xact, true)
     val xactTimestamp = transaction.timestamp
+    // Check Reads
     val xactsInInterval = committedTransactions.filterNot(x => x.timestamp > xactTimestamp && x.timestamp <= startAndCommitTimestampGen)
-    val keysInInterval = xactsInInterval.flatMap(x => x.logRead).filter(_.isInstanceOf[Read]).map{case Read(k, _) => k}.toSet
-    val keysReadInTransaction = transaction.logRead.filter(_.isInstanceOf[Read]).map{case Read(k, _) => k}.toSet
+    val keysInInterval = xactsInInterval.flatMap(x => x.logRead).map{case Read(k, _) => k}.toSet
+    val keysReadInTransaction = transaction.logRead.map{case Read(k, _) => k}.toSet
+    // Check ModQuery
+
+    val writeInInterval = xactsInInterval.flatMap(x => x.logWrite)
+    val moduloInInterval = transaction.logModQuery.map{case ModQuery(k, _) => k}.toSet
+
+    val isValidMod = writeInInterval.forall{
+      case Write(_, value) => moduloInInterval.forall(mod => value % mod != 0)
+    }
+
+    println(isValidMod)
+
+    // A ModQuery should fail the transaction if a new Key is inserted after the beginning of the transaction, if
+    println(s"keys to check: $keysInInterval")
+    println(s"our reads: ${keysReadInTransaction}")
 
     val isValid: Boolean = (keysInInterval &~ keysReadInTransaction).isEmpty
     
-    if (isValid) {
-      startAndCommitTimestampGen += 1 //SHOULD BE USED
-      //toutes les versions ecrites -> update le timestamp avec celui du comitted (startandcommite)
+    if (isValid && isValidMod) {
+      startAndCommitTimestampGen += 1 
       updateTimestamp(transaction, startAndCommitTimestampGen)
-      // add transaction in the comitted set
+      // add transaction in the committed set
       transaction.committed = true
       transaction.finished = true
       committedTransactions.add(transaction)
